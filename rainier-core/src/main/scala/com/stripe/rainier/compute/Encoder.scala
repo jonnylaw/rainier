@@ -67,4 +67,24 @@ object Encoder {
       def extract(t: Seq[T], acc: List[Double]) =
         t.foldRight(acc) { case (x, a) => enc.extract(x, a) }
     }
+
+  def asMapEncoder[T](fields: Seq[String])(
+      implicit toMap: T => Map[String, Double]): Encoder[T] =
+    new Encoder[T] {
+      type U = Map[String, Real]
+      def wrap(t: T): Map[String, Real] =
+        toMap.apply(t).mapValues(Real(_))
+
+      def create(acc: List[Variable]): (Map[String, Real], List[Variable]) =
+        fields.foldRight((Map[String, Real](), acc)) {
+          case (field, (map, _)) =>
+            val v = new Variable
+            (map + (field -> v), v :: acc)
+        }
+
+      def extract(t: T, acc: List[Double]): List[Double] = {
+        val map = toMap(t)
+        fields.foldRight(acc) { case (x, a) => map(x) :: a }
+      }
+    }
 }
