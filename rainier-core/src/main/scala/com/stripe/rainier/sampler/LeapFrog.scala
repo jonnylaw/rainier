@@ -4,10 +4,10 @@ import Log._
 
 private[sampler] case class LeapFrog(density: DensityFunction) {
   /*
-  Params layout:
-  array(0..(n-1)) == ps
-  array(n..(n*2-1)) == qs
-  array(n*2) == potential
+   Params layout:
+   array(0..(n-1)) == ps
+   array(n..(n*2-1)) == qs
+   array(n*2) == potential
    */
   private val nVars = density.nVars
   private val potentialIndex = nVars * 2
@@ -150,6 +150,116 @@ private[sampler] case class LeapFrog(density: DensityFunction) {
                             k: Int,
                             stepSize: Double)(implicit rng: RNG): Vector[Int] =
     Vector.fill(k)(longestBatchStep(params, l0, stepSize))
+
+  var pqMinus = new Array[Double](inputOutputSize)
+  var pqPlus = new Array[Double](inputOutputSize)
+  var s: Boolean = true
+  var nAccept: Int = 0
+
+  /**
+    * Check if we have made a u-turn
+    */
+  def updateS(pqP: Array[Double], pqM: Array[Double]) = {
+
+    var i1 = 0.0
+    var i2 = 0.0
+    var i = 0
+    while (i < nVars) {
+      i1 += (pqP(i + nVars) - pqM(i + nVars)) * pqM(i)
+      i2 += (pqP(i + nVars) - pqM(i + nVars)) * pqP(i)
+      i += 1
+    }
+
+    s = s && (i1 >= 0) && (i2 >= 0)
+  }
+
+  /**
+    * Implicitly build a binary tree
+    */
+  def buildTree(u: Double,
+                v: Int,
+                j: Int,
+                stepSize: Double,
+                deltamax: Double,
+                params: Array[Double])(implicit rng: RNG): Double = {
+
+    copy(params, pqBuf)
+
+    if (j == 0) {
+      steps(1, stepSize * v)
+      val a1 = pqBuf(potentialIndex) - kinetic(pqBuf)
+      val n = if (math.log(u) <= a1) 1.0 else 0
+      s = (deltamax + a1) > math.log(u)
+
+      if (v == -1)
+        copy(pqBuf, pqMinus)
+      else
+        copy(pqBuf, pqPlus)
+
+      n
+    } else {
+      val n = buildTree(u, v, j - 1, stepSize, deltamax, params)
+
+      if (s) {
+        val n2 = if (v == -1) {
+          copy(pqMinus, pqBuf)
+          buildTree(u, v, j - 1, stepSize, deltamax, params)
+        } else {
+          copy(pqPlus, pqBuf)
+          buildTree(u, v, j - 1, stepSize, deltamax, params)
+        }
+        val u1 = rng.standardNormal
+        val p = n2 / math.max(n2 + n, 1.0)
+        if (u1 < p)
+          copy(pqBuf, params)
+
+        updateS(pqPlus, pqMinus)
+        n + n2
+      } else {
+        n
+      }
+    }
+  }
+
+  def sampleDirection(implicit rng: RNG): Int = {
+    val u = rng.standardUniform
+    if (u < 0.5) -1 else 1
+  }
+
+  var maxTreeDepth = 10
+
+  def loopTrees(u: Double,
+                stepSize: Double,
+                deltamax: Double,
+                params: Array[Double])(implicit rng: RNG) = {
+
+    var n = 1.0
+    var j = 0
+    while (s && j < maxTreeDepth) {
+      val vj = sampleDirection
+      val n2 = buildTree(u, vj, j, stepSize, deltamax, params)
+      val u1 = rng.standardUniform
+      val p = n2 / n
+      if (s && u1 < p)
+        copy(pqBuf, params)
+      n += n2
+      updateS(pqPlus, pqMinus)
+      j += 1
+    }
+  }
+
+  /**
+    * A single step of the NUTS algorithm
+    * @param s the current state
+    */
+  def stepNuts(deltaMax: Double, params: Array[Double], stepSize: Double)(
+      implicit rng: RNG): Unit = {
+    initializePs(params)
+    copy(params, pqBuf)
+    val u = rng.standardUniform * math.exp(
+      pqBuf(potentialIndex) - kinetic(pqBuf))
+    loopTrees(u, stepSize, deltaMax, params)
+  }
 
   private def copy(sourceArray: Array[Double],
                    targetArray: Array[Double]): Unit =
